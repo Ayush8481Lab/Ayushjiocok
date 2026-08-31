@@ -1,5 +1,5 @@
 <?php
-// index.php - Generate __hdnea__ via ScraperAPI (with body debug)
+// index.php - Generate __hdnea__ via ScraperAPI Proxy Mode (India IP)
 error_reporting(0);
 ini_set('max_execution_time', '60');
 
@@ -20,62 +20,41 @@ function extractCookiesFromHeader($headerText) {
     return $cookies;
 }
 
-function makeRequestViaScraperApi($targetUrl, $headers, $apiKey) {
-    $scraperUrl = "http://api.scraperapi.com/?api_key=" . urlencode($apiKey)
-                . "&url=" . urlencode($targetUrl)
-                . "&country_code=in";
-
-    // Build request headers to send to ScraperAPI (they will be forwarded)
-    $requestHeaders = [
-        "User-Agent: plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7",
-        "Accept: */*",
-        "Accept-Encoding: identity",
-        "Connection: close",
-    ];
-
-    // Add Cookie separately to ensure proper formatting
-    if (isset($headers['Cookie'])) {
-        $requestHeaders[] = "Cookie: " . $headers['Cookie'];
-    }
-
-    // Add all other headers (except Cookie, User-Agent, Accept, etc. to avoid duplicates)
-    foreach ($headers as $key => $value) {
-        $lowerKey = strtolower($key);
-        if (in_array($lowerKey, ['cookie', 'user-agent', 'accept', 'accept-encoding', 'connection'])) {
-            continue;
-        }
-        $requestHeaders[] = "$key: $value";
-    }
-
-    $ch = curl_init($scraperUrl);
-    curl_setopt_array($ch, [
+function makeRequestViaProxy($url, $headers, $proxy, $proxyAuth) {
+    $ch = curl_init($url);
+    $options = [
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER => $requestHeaders,
-        CURLOPT_HEADER => true,   // include response headers
+        CURLOPT_HTTPHEADER => $headers,
+        CURLOPT_HEADER => true,
         CURLOPT_TIMEOUT => 15,
         CURLOPT_CONNECTTIMEOUT => 5,
-    ]);
+        CURLOPT_PROXY => $proxy,
+        CURLOPT_PROXYTYPE => CURLPROXY_HTTP,
+        CURLOPT_PROXYUSERPWD => $proxyAuth,
+        CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,   // force IPv4 to avoid DNS issues
+    ];
+    curl_setopt_array($ch, $options);
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
     $headerText = $response !== false ? substr($response, 0, $headerSize) : '';
-    $body = $response !== false ? substr($response, $headerSize) : '';
     $error = curl_error($ch);
     curl_close($ch);
-    return [$httpCode, $headerText, $body, $error];
+    return [$httpCode, $headerText, $error];
 }
 
-// Test mode
+// Test mode: check proxy connectivity
 if (isset($_GET['test'])) {
-    $apiKey = "aac93ab62142f5ea8c722425382fd586";
+    $proxy = "proxy.scraperapi.com:8001";
+    $auth = "scraperapi.country_code=in:" . "aac93ab62142f5ea8c722425382fd586";
     $targetUrl = "http://httpbin.org/headers";
-    list($code, $headerText, $body, $error) = makeRequestViaScraperApi($targetUrl, ['Cookie' => ''], $apiKey);
+    $headers = ["User-Agent: Test", "Accept: */*"];
+    list($code, $headerText, $error) = makeRequestViaProxy($targetUrl, $headers, $proxy, $auth);
     header('Content-Type: application/json');
     echo json_encode([
         'http_code' => $code,
         'curl_error' => $error,
         'response_headers' => $headerText,
-        'response_body' => $body,
     ], JSON_PRETTY_PRINT);
     exit;
 }
@@ -91,11 +70,11 @@ if (empty($ck)) {
 $cookie = hex2str($ck);
 
 $headers = [
-    "Cookie" => $cookie,
-    "User-Agent" => "plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7",
-    "Accept" => "*/*",
-    "Accept-Encoding" => "identity",
-    "Connection" => "close",
+    "Cookie: $cookie",
+    "User-Agent: plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7",
+    "Accept: */*",
+    "Accept-Encoding: identity",
+    "Connection: close",
 ];
 
 // Optional credentials (if provided)
@@ -154,18 +133,19 @@ if (!empty($id)) {
 }
 
 $SCRAPER_API_KEY = "aac93ab62142f5ea8c722425382fd586";
+$proxyHost = "proxy.scraperapi.com:8001";
+$proxyAuth = "scraperapi.country_code=in:" . $SCRAPER_API_KEY;
 
 $cookiesFound = [];
 $debug = [];
 
 for ($i = 0; $i < 2; $i++) {
-    list($httpCode, $headerText, $body, $error) = makeRequestViaScraperApi($url, $headers, $SCRAPER_API_KEY);
+    list($httpCode, $headerText, $error) = makeRequestViaProxy($url, $headers, $proxyHost, $proxyAuth);
     $debug[] = [
         'request_number' => $i + 1,
         'http_code' => $httpCode,
         'curl_error' => $error,
         'headers' => $headerText,
-        'body' => $body,
     ];
     if ($httpCode == 450 || $httpCode == 0) {
         break;
