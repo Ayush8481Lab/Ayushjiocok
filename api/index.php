@@ -1,6 +1,5 @@
 <?php
-// index.php - Generate fresh universal __hdnea__ from existing __hdnea__ cookie
-// Includes detailed error output when __hdnea__ is not found.
+// index.php - Get __hdnea__ via Indian proxy (for Vercel)
 error_reporting(0);
 
 function hex2str($hex) {
@@ -20,11 +19,25 @@ function extractCookiesFromHeader($headerText) {
     return $cookies;
 }
 
-function decrypt_data($e_data, $key) {
-    $key = (int) $key;
-    $encrypted = base64_decode($e_data);
-    $decrypted = array_map(fn($char) => chr(ord($char) - $key), str_split($encrypted));
-    return implode('', $decrypted);
+function makeRequest($url, $headers, $proxy = null) {
+    $ch = curl_init($url);
+    $options = [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => $headers,
+        CURLOPT_HEADER => true,
+        CURLOPT_TIMEOUT => 10,
+    ];
+    if ($proxy) {
+        $options[CURLOPT_PROXY] = $proxy;
+        $options[CURLOPT_PROXYTYPE] = CURLPROXY_HTTP;
+    }
+    curl_setopt_array($ch, $options);
+    $response = curl_exec($ch);
+    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $headerText = substr($response, 0, $headerSize);
+    curl_close($ch);
+    return [$httpCode, $headerText];
 }
 
 $ck = $_REQUEST['ck'] ?? '';
@@ -42,13 +55,19 @@ $headers = [
     "User-Agent: plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7"
 ];
 
-// Optional credentials from environment or query
+// Optional credentials (if needed)
 $JIOCRED = getenv('JIOCRED');
 $CREDKEY = getenv('CREDKEY');
 $jiocred_hex = $_REQUEST['jiocred'] ?? $JIOCRED;
 $credkey_hex = $_REQUEST['credkey'] ?? $CREDKEY;
 
 if (!empty($jiocred_hex) && !empty($credkey_hex)) {
+    function decrypt_data($e_data, $key) {
+        $key = (int) $key;
+        $encrypted = base64_decode($e_data);
+        $decrypted = array_map(fn($char) => chr(ord($char) - $key), str_split($encrypted));
+        return implode('', $decrypted);
+    }
     $jiocred = hex2str($jiocred_hex);
     $credkey = hex2str($credkey_hex);
     $cred = json_decode(decrypt_data($jiocred, $credkey), true);
@@ -58,7 +77,6 @@ if (!empty($jiocred_hex) && !empty($credkey_hex)) {
         $device_id = $cred['deviceId'] ?? '';
         $unique_id = $cred['sessionAttributes']['user']['unique'] ?? '';
         $sso_token = $cred['sessionAttributes']['user']['ssoToken'] ?? '';
-
         $headers = array_merge($headers, [
             "accesstoken: $access_token",
             "appkey: NzNiMDhlYcQyNjJm",
@@ -82,6 +100,7 @@ if (!empty($jiocred_hex) && !empty($credkey_hex)) {
     }
 }
 
+// Build CDN URL
 if (!empty($id)) {
     $parts = explode('-', $id, 2);
     $channel = $parts[0];
@@ -90,47 +109,64 @@ if (!empty($id)) {
     $url = "https://jiotvmblive.cdn.jio.com/";
 }
 
-$allCookies = [];
-$debugInfo = []; // store debug data
+// ---- PROXY HANDLING ----
+$proxy = null;
 
-for ($i = 0; $i < 2; $i++) {
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER => $headers,
-        CURLOPT_HEADER => true,
-        CURLOPT_TIMEOUT => 10
-    ]);
-    $response = curl_exec($ch);
-    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $headerText = substr($response, 0, $headerSize);
-    $body = substr($response, $headerSize);
-    curl_close($ch);
-
-    $debugInfo[] = [
-        'request_number' => $i + 1,
-        'http_code' => $httpCode,
-        'headers' => $headerText,
-        'body' => $body,
-    ];
-
-    $cookies = extractCookiesFromHeader($headerText);
-    $allCookies = array_merge($allCookies, $cookies);
+// 1. Check for a dedicated proxy from environment or query param
+$dedicatedProxy = getenv('INDIAN_PROXY') ?: ($_REQUEST['proxy'] ?? '');
+if ($dedicatedProxy) {
+    $proxy = $dedicatedProxy;
+} else {
+    // 2. Fallback: fetch a list of proxies (replace with an Indian-only list)
+    $listUrl = "https://raw.githubusercontent.com/sayanpal514-hue/Proxy-Fetcher/refs/heads/main/live.txt";
+    $proxies = @file_get_contents($listUrl);
+    if ($proxies !== false) {
+        $proxies = array_filter(array_map('trim', explode("\n", $proxies)));
+        // We'll try each proxy below
+    } else {
+        http_response_code(500);
+        exit("No proxy configured and proxy list unreachable");
+    }
 }
 
-if (isset($allCookies['__hdnea__'])) {
-    $hdnea = '__hdnea__=' . $allCookies['__hdnea__'];
+$cookies_found = [];
+$success = false;
+
+// If we have a single proxy, try it directly
+if ($proxy) {
+    for ($i = 0; $i < 2; $i++) {
+        list($httpCode, $headerText) = makeRequest($url, $headers, $proxy);
+        if ($httpCode == 450) break; // blocked, proxy not Indian
+        $cookies = extractCookiesFromHeader($headerText);
+        $cookies_found = array_merge($cookies_found, $cookies);
+    }
+    if (isset($cookies_found['__hdnea__'])) {
+        $success = true;
+    }
+}
+// Otherwise try the list
+elseif (isset($proxies)) {
+    foreach ($proxies as $proxy) {
+        if (empty($proxy)) continue;
+        $cookies_found = [];
+        for ($i = 0; $i < 2; $i++) {
+            list($httpCode, $headerText) = makeRequest($url, $headers, $proxy);
+            if ($httpCode == 450) break;
+            $cookies = extractCookiesFromHeader($headerText);
+            $cookies_found = array_merge($cookies_found, $cookies);
+        }
+        if (isset($cookies_found['__hdnea__'])) {
+            $success = true;
+            break;
+        }
+    }
+}
+
+if ($success) {
+    $hdnea = '__hdnea__=' . $cookies_found['__hdnea__'];
     echo bin2hex($hdnea);
 } else {
-    // Output detailed debug information
-    header('Content-Type: application/json');
     http_response_code(500);
-    echo json_encode([
-        'error' => '__hdnea__ not found',
-        'url' => $url,
-        'requests' => $debugInfo,
-        'cookies_found' => array_keys($allCookies),
-    ], JSON_PRETTY_PRINT);
+    echo "Error: Could not obtain __hdnea__. Check proxy location (must be India) or credentials.";
 }
 ?>
