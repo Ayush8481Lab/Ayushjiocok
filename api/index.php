@@ -1,5 +1,5 @@
 <?php
-// index.php - Generate __hdnea__ via ScraperAPI Proxy Mode (India IP)
+// index.php - Generate __hdnea__ via ScraperAPI Proxy (with manual DNS resolution)
 error_reporting(0);
 ini_set('max_execution_time', '60');
 
@@ -20,7 +20,34 @@ function extractCookiesFromHeader($headerText) {
     return $cookies;
 }
 
-function makeRequestViaProxy($url, $headers, $proxy, $proxyAuth) {
+function resolveProxyIp($hostname) {
+    // First try system DNS
+    $ip = gethostbyname($hostname);
+    if ($ip !== $hostname) {
+        return $ip;
+    }
+
+    // Fallback: DNS-over-HTTPS via Cloudflare
+    $dohUrl = "https://cloudflare-dns.com/dns-query?name=" . urlencode($hostname) . "&type=A";
+    $options = [
+        'http' => [
+            'header' => "accept: application/dns-json\r\n",
+            'timeout' => 5,
+        ],
+    ];
+    $context = stream_context_create($options);
+    $result = @file_get_contents($dohUrl, false, $context);
+    if ($result !== false) {
+        $data = json_decode($result, true);
+        if (isset($data['Answer'][0]['data'])) {
+            return $data['Answer'][0]['data'];
+        }
+    }
+    return false;
+}
+
+function makeRequestViaProxy($url, $headers, $proxyIp, $proxyPort, $proxyAuth) {
+    $proxy = $proxyIp . ':' . $proxyPort;
     $ch = curl_init($url);
     $options = [
         CURLOPT_RETURNTRANSFER => true,
@@ -31,7 +58,7 @@ function makeRequestViaProxy($url, $headers, $proxy, $proxyAuth) {
         CURLOPT_PROXY => $proxy,
         CURLOPT_PROXYTYPE => CURLPROXY_HTTP,
         CURLOPT_PROXYUSERPWD => $proxyAuth,
-        CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,   // force IPv4 to avoid DNS issues
+        CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
     ];
     curl_setopt_array($ch, $options);
     $response = curl_exec($ch);
@@ -43,15 +70,22 @@ function makeRequestViaProxy($url, $headers, $proxy, $proxyAuth) {
     return [$httpCode, $headerText, $error];
 }
 
-// Test mode: check proxy connectivity
+// Test mode: check proxy connectivity using resolved IP
 if (isset($_GET['test'])) {
-    $proxy = "proxy.scraperapi.com:8001";
-    $auth = "scraperapi.country_code=in:" . "aac93ab62142f5ea8c722425382fd586";
+    $host = "proxy.scraperapi.com";
+    $ip = resolveProxyIp($host);
+    if ($ip === false) {
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'DNS resolution failed for proxy.scraperapi.com']);
+        exit;
+    }
+    $proxyAuth = "scraperapi.country_code=in:aac93ab62142f5ea8c722425382fd586";
     $targetUrl = "http://httpbin.org/headers";
     $headers = ["User-Agent: Test", "Accept: */*"];
-    list($code, $headerText, $error) = makeRequestViaProxy($targetUrl, $headers, $proxy, $auth);
+    list($code, $headerText, $error) = makeRequestViaProxy($targetUrl, $headers, $ip, 8001, $proxyAuth);
     header('Content-Type: application/json');
     echo json_encode([
+        'resolved_ip' => $ip,
         'http_code' => $code,
         'curl_error' => $error,
         'response_headers' => $headerText,
@@ -133,14 +167,24 @@ if (!empty($id)) {
 }
 
 $SCRAPER_API_KEY = "aac93ab62142f5ea8c722425382fd586";
-$proxyHost = "proxy.scraperapi.com:8001";
+$proxyHostname = "proxy.scraperapi.com";
+$proxyPort = 8001;
 $proxyAuth = "scraperapi.country_code=in:" . $SCRAPER_API_KEY;
+
+// Resolve proxy IP
+$proxyIp = resolveProxyIp($proxyHostname);
+if ($proxyIp === false) {
+    http_response_code(500);
+    header('Content-Type: application/json');
+    echo json_encode(['error' => 'Could not resolve proxy IP for proxy.scraperapi.com']);
+    exit;
+}
 
 $cookiesFound = [];
 $debug = [];
 
 for ($i = 0; $i < 2; $i++) {
-    list($httpCode, $headerText, $error) = makeRequestViaProxy($url, $headers, $proxyHost, $proxyAuth);
+    list($httpCode, $headerText, $error) = makeRequestViaProxy($url, $headers, $proxyIp, $proxyPort, $proxyAuth);
     $debug[] = [
         'request_number' => $i + 1,
         'http_code' => $httpCode,
@@ -163,6 +207,7 @@ if (isset($cookiesFound['__hdnea__'])) {
     echo json_encode([
         'error' => '__hdnea__ not found',
         'url' => $url,
+        'resolved_proxy_ip' => $proxyIp,
         'requests' => $debug,
         'cookies_found' => array_keys($cookiesFound),
     ], JSON_PRETTY_PRINT);
