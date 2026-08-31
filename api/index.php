@@ -1,6 +1,9 @@
 <?php
-// index.php - Get __hdnea__ via Indian proxy (for Vercel)
+// index.php - Generate __hdnea__ via concurrent proxy attempts (for Vercel)
 error_reporting(0);
+
+// Increase max execution time (Vercel supports up to 60s with Hobby)
+ini_set('max_execution_time', '60');
 
 function hex2str($hex) {
     $s = hex2bin($hex);
@@ -19,25 +22,21 @@ function extractCookiesFromHeader($headerText) {
     return $cookies;
 }
 
-function makeRequest($url, $headers, $proxy = null) {
+function makeCurlHandle($url, $headers, $proxy) {
     $ch = curl_init($url);
     $options = [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_HTTPHEADER => $headers,
         CURLOPT_HEADER => true,
-        CURLOPT_TIMEOUT => 10,
+        CURLOPT_TIMEOUT => 5,          // short timeout per proxy
+        CURLOPT_CONNECTTIMEOUT => 3,
     ];
     if ($proxy) {
         $options[CURLOPT_PROXY] = $proxy;
         $options[CURLOPT_PROXYTYPE] = CURLPROXY_HTTP;
     }
     curl_setopt_array($ch, $options);
-    $response = curl_exec($ch);
-    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $headerText = substr($response, 0, $headerSize);
-    curl_close($ch);
-    return [$httpCode, $headerText];
+    return $ch;
 }
 
 $ck = $_REQUEST['ck'] ?? '';
@@ -55,7 +54,7 @@ $headers = [
     "User-Agent: plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7"
 ];
 
-// Optional credentials (if needed)
+// Optional credentials from environment or query (if needed)
 $JIOCRED = getenv('JIOCRED');
 $CREDKEY = getenv('CREDKEY');
 $jiocred_hex = $_REQUEST['jiocred'] ?? $JIOCRED;
@@ -109,64 +108,81 @@ if (!empty($id)) {
     $url = "https://jiotvmblive.cdn.jio.com/";
 }
 
-// ---- PROXY HANDLING ----
-$proxy = null;
-
-// 1. Check for a dedicated proxy from environment or query param
+// Get proxy list (or use a dedicated proxy from env)
 $dedicatedProxy = getenv('INDIAN_PROXY') ?: ($_REQUEST['proxy'] ?? '');
 if ($dedicatedProxy) {
-    $proxy = $dedicatedProxy;
+    $proxyList = [$dedicatedProxy];
 } else {
-    // 2. Fallback: fetch a list of proxies (replace with an Indian-only list)
     $listUrl = "https://raw.githubusercontent.com/sayanpal514-hue/Proxy-Fetcher/refs/heads/main/live.txt";
-    $proxies = @file_get_contents($listUrl);
-    if ($proxies !== false) {
-        $proxies = array_filter(array_map('trim', explode("\n", $proxies)));
-        // We'll try each proxy below
-    } else {
+    $proxyData = @file_get_contents($listUrl);
+    if ($proxyData === false) {
         http_response_code(500);
-        exit("No proxy configured and proxy list unreachable");
+        exit("Could not fetch proxy list");
+    }
+    $proxyList = array_filter(array_map('trim', explode("\n", $proxyData)));
+    if (empty($proxyList)) {
+        http_response_code(500);
+        exit("Proxy list is empty");
     }
 }
 
-$cookies_found = [];
+// Test proxies in batches of 10 concurrently
+$batchSize = 10;
+$startTime = microtime(true);
+$maxDuration = 50; // seconds (leave margin for Vercel timeout)
 $success = false;
+$resultHex = '';
 
-// If we have a single proxy, try it directly
-if ($proxy) {
-    for ($i = 0; $i < 2; $i++) {
-        list($httpCode, $headerText) = makeRequest($url, $headers, $proxy);
-        if ($httpCode == 450) break; // blocked, proxy not Indian
-        $cookies = extractCookiesFromHeader($headerText);
-        $cookies_found = array_merge($cookies_found, $cookies);
+for ($i = 0; $i < count($proxyList); $i += $batchSize) {
+    if ((microtime(true) - $startTime) > $maxDuration) {
+        break; // overall time limit reached
     }
-    if (isset($cookies_found['__hdnea__'])) {
-        $success = true;
+
+    $batch = array_slice($proxyList, $i, $batchSize);
+    $multi = curl_multi_init();
+    $handles = [];
+
+    foreach ($batch as $proxy) {
+        $ch = makeCurlHandle($url, $headers, $proxy);
+        curl_multi_add_handle($multi, $ch);
+        $handles[$proxy] = $ch;
     }
-}
-// Otherwise try the list
-elseif (isset($proxies)) {
-    foreach ($proxies as $proxy) {
-        if (empty($proxy)) continue;
-        $cookies_found = [];
-        for ($i = 0; $i < 2; $i++) {
-            list($httpCode, $headerText) = makeRequest($url, $headers, $proxy);
-            if ($httpCode == 450) break;
+
+    // Execute the batch
+    do {
+        $status = curl_multi_exec($multi, $active);
+        if ($active) {
+            curl_multi_select($multi, 1.0);
+        }
+    } while ($active && $status == CURLM_OK);
+
+    // Check results
+    foreach ($handles as $proxy => $ch) {
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $response = curl_multi_getcontent($ch);
+        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $headerText = substr($response, 0, $headerSize);
+        curl_multi_remove_handle($multi, $ch);
+        curl_close($ch);
+
+        if ($httpCode != 450 && $httpCode != 0) {
             $cookies = extractCookiesFromHeader($headerText);
-            $cookies_found = array_merge($cookies_found, $cookies);
-        }
-        if (isset($cookies_found['__hdnea__'])) {
-            $success = true;
-            break;
+            if (isset($cookies['__hdnea__'])) {
+                $hdnea = '__hdnea__=' . $cookies['__hdnea__'];
+                $resultHex = bin2hex($hdnea);
+                $success = true;
+                break 2; // exit both loops
+            }
         }
     }
+
+    curl_multi_close($multi);
 }
 
 if ($success) {
-    $hdnea = '__hdnea__=' . $cookies_found['__hdnea__'];
-    echo bin2hex($hdnea);
+    echo $resultHex;
 } else {
     http_response_code(500);
-    echo "Error: Could not obtain __hdnea__. Check proxy location (must be India) or credentials.";
+    echo "Error: Could not obtain __hdnea__ using any available proxy.";
 }
 ?>
