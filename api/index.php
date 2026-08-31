@@ -1,16 +1,14 @@
 <?php
 // index.php - Generate fresh universal __hdnea__ from existing __hdnea__ cookie
-// Deployable on Vercel (or any PHP host). No file storage.
+// Includes detailed error output when __hdnea__ is not found.
 error_reporting(0);
 
-// Helper: hex to string
 function hex2str($hex) {
     $s = hex2bin($hex);
     if ($s === false) { http_response_code(400); exit("Invalid hex string"); }
     return $s;
 }
 
-// Helper: extract cookies from HTTP headers
 function extractCookiesFromHeader($headerText) {
     $cookies = [];
     foreach (explode("\r\n", $headerText) as $line) {
@@ -22,7 +20,6 @@ function extractCookiesFromHeader($headerText) {
     return $cookies;
 }
 
-// Helper: decrypt credentials (if provided)
 function decrypt_data($e_data, $key) {
     $key = (int) $key;
     $encrypted = base64_decode($e_data);
@@ -30,7 +27,6 @@ function decrypt_data($e_data, $key) {
     return implode('', $decrypted);
 }
 
-// Get parameters (ck and id are required)
 $ck = $_REQUEST['ck'] ?? '';
 $id = $_REQUEST['id'] ?? '';
 
@@ -41,16 +37,14 @@ if (empty($ck)) {
 
 $cookie = hex2str($ck);
 
-// Base headers
 $headers = [
     "Cookie: $cookie",
     "User-Agent: plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7"
 ];
 
-// Optional credentials from environment variables (set in Vercel dashboard)
-$JIOCRED = getenv('JIOCRED');     // hex-encoded encrypted creds
-$CREDKEY = getenv('CREDKEY');     // hex-encoded key
-// Or you can pass them as query parameters (less secure)
+// Optional credentials from environment or query
+$JIOCRED = getenv('JIOCRED');
+$CREDKEY = getenv('CREDKEY');
 $jiocred_hex = $_REQUEST['jiocred'] ?? $JIOCRED;
 $credkey_hex = $_REQUEST['credkey'] ?? $CREDKEY;
 
@@ -88,7 +82,6 @@ if (!empty($jiocred_hex) && !empty($credkey_hex)) {
     }
 }
 
-// Determine URL to request
 if (!empty($id)) {
     $parts = explode('-', $id, 2);
     $channel = $parts[0];
@@ -97,8 +90,9 @@ if (!empty($id)) {
     $url = "https://jiotvmblive.cdn.jio.com/";
 }
 
-// Two requests to ensure cookie refresh
 $allCookies = [];
+$debugInfo = []; // store debug data
+
 for ($i = 0; $i < 2; $i++) {
     $ch = curl_init($url);
     curl_setopt_array($ch, [
@@ -109,8 +103,18 @@ for ($i = 0; $i < 2; $i++) {
     ]);
     $response = curl_exec($ch);
     $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $headerText = substr($response, 0, $headerSize);
+    $body = substr($response, $headerSize);
     curl_close($ch);
+
+    $debugInfo[] = [
+        'request_number' => $i + 1,
+        'http_code' => $httpCode,
+        'headers' => $headerText,
+        'body' => $body,
+    ];
+
     $cookies = extractCookiesFromHeader($headerText);
     $allCookies = array_merge($allCookies, $cookies);
 }
@@ -119,7 +123,14 @@ if (isset($allCookies['__hdnea__'])) {
     $hdnea = '__hdnea__=' . $allCookies['__hdnea__'];
     echo bin2hex($hdnea);
 } else {
+    // Output detailed debug information
+    header('Content-Type: application/json');
     http_response_code(500);
-    echo "Error: __hdnea__ not found. Check ck validity or provide credentials.";
+    echo json_encode([
+        'error' => '__hdnea__ not found',
+        'url' => $url,
+        'requests' => $debugInfo,
+        'cookies_found' => array_keys($allCookies),
+    ], JSON_PRETTY_PRINT);
 }
 ?>
