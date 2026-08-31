@@ -1,5 +1,5 @@
 <?php
-// index.php - Generate __hdnea__ via ScraperAPI HTTP API (India IP)
+// index.php - Generate __hdnea__ via ScraperAPI (with body debug)
 error_reporting(0);
 ini_set('max_execution_time', '60');
 
@@ -21,52 +21,61 @@ function extractCookiesFromHeader($headerText) {
 }
 
 function makeRequestViaScraperApi($targetUrl, $headers, $apiKey) {
-    // Build ScraperAPI URL
     $scraperUrl = "http://api.scraperapi.com/?api_key=" . urlencode($apiKey)
                 . "&url=" . urlencode($targetUrl)
-                . "&country_code=in"; // Request Indian IP
+                . "&country_code=in";
 
-    // Prepare headers to pass to ScraperAPI (they will be forwarded to target)
+    // Build request headers to send to ScraperAPI (they will be forwarded)
     $requestHeaders = [
         "User-Agent: plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7",
-        // The Cookie header must be sent to ScraperAPI, it will forward it
-        "Cookie: " . $headers['Cookie'] ?? ''
+        "Accept: */*",
+        "Accept-Encoding: identity",
+        "Connection: close",
     ];
-    // Add any other Jio-specific headers if present (e.g., accesstoken, etc.)
-    // We'll assume $headers array contains all required headers
+
+    // Add Cookie separately to ensure proper formatting
+    if (isset($headers['Cookie'])) {
+        $requestHeaders[] = "Cookie: " . $headers['Cookie'];
+    }
+
+    // Add all other headers (except Cookie, User-Agent, Accept, etc. to avoid duplicates)
     foreach ($headers as $key => $value) {
-        if (strtolower($key) !== 'cookie') {
-            $requestHeaders[] = "$key: $value";
+        $lowerKey = strtolower($key);
+        if (in_array($lowerKey, ['cookie', 'user-agent', 'accept', 'accept-encoding', 'connection'])) {
+            continue;
         }
+        $requestHeaders[] = "$key: $value";
     }
 
     $ch = curl_init($scraperUrl);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_HTTPHEADER => $requestHeaders,
-        CURLOPT_HEADER => true,   // We need response headers from ScraperAPI (which include target's headers)
-        CURLOPT_TIMEOUT => 10,
+        CURLOPT_HEADER => true,   // include response headers
+        CURLOPT_TIMEOUT => 15,
         CURLOPT_CONNECTTIMEOUT => 5,
     ]);
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
     $headerText = $response !== false ? substr($response, 0, $headerSize) : '';
+    $body = $response !== false ? substr($response, $headerSize) : '';
     $error = curl_error($ch);
     curl_close($ch);
-    return [$httpCode, $headerText, $error];
+    return [$httpCode, $headerText, $body, $error];
 }
 
-// Test mode: check basic connectivity to ScraperAPI
+// Test mode
 if (isset($_GET['test'])) {
     $apiKey = "aac93ab62142f5ea8c722425382fd586";
     $targetUrl = "http://httpbin.org/headers";
-    list($code, $headerText, $error) = makeRequestViaScraperApi($targetUrl, ['Cookie' => ''], $apiKey);
+    list($code, $headerText, $body, $error) = makeRequestViaScraperApi($targetUrl, ['Cookie' => ''], $apiKey);
     header('Content-Type: application/json');
     echo json_encode([
         'http_code' => $code,
         'curl_error' => $error,
         'response_headers' => $headerText,
+        'response_body' => $body,
     ], JSON_PRETTY_PRINT);
     exit;
 }
@@ -83,7 +92,10 @@ $cookie = hex2str($ck);
 
 $headers = [
     "Cookie" => $cookie,
-    "User-Agent" => "plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7"
+    "User-Agent" => "plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7",
+    "Accept" => "*/*",
+    "Accept-Encoding" => "identity",
+    "Connection" => "close",
 ];
 
 // Optional credentials (if provided)
@@ -146,14 +158,14 @@ $SCRAPER_API_KEY = "aac93ab62142f5ea8c722425382fd586";
 $cookiesFound = [];
 $debug = [];
 
-// Make two requests via ScraperAPI
 for ($i = 0; $i < 2; $i++) {
-    list($httpCode, $headerText, $error) = makeRequestViaScraperApi($url, $headers, $SCRAPER_API_KEY);
+    list($httpCode, $headerText, $body, $error) = makeRequestViaScraperApi($url, $headers, $SCRAPER_API_KEY);
     $debug[] = [
         'request_number' => $i + 1,
         'http_code' => $httpCode,
         'curl_error' => $error,
         'headers' => $headerText,
+        'body' => $body,
     ];
     if ($httpCode == 450 || $httpCode == 0) {
         break;
