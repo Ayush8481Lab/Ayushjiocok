@@ -1,5 +1,5 @@
 <?php
-// index.php - Generate __hdnea__ via ScraperAPI (with detailed errors)
+// index.php - Generate __hdnea__ via ScraperAPI HTTP API (India IP)
 error_reporting(0);
 ini_set('max_execution_time', '60');
 
@@ -20,21 +20,34 @@ function extractCookiesFromHeader($headerText) {
     return $cookies;
 }
 
-function makeRequest($url, $headers, $proxy, $proxyAuth) {
-    $ch = curl_init($url);
-    $options = [
+function makeRequestViaScraperApi($targetUrl, $headers, $apiKey) {
+    // Build ScraperAPI URL
+    $scraperUrl = "http://api.scraperapi.com/?api_key=" . urlencode($apiKey)
+                . "&url=" . urlencode($targetUrl)
+                . "&country_code=in"; // Request Indian IP
+
+    // Prepare headers to pass to ScraperAPI (they will be forwarded to target)
+    $requestHeaders = [
+        "User-Agent: plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7",
+        // The Cookie header must be sent to ScraperAPI, it will forward it
+        "Cookie: " . $headers['Cookie'] ?? ''
+    ];
+    // Add any other Jio-specific headers if present (e.g., accesstoken, etc.)
+    // We'll assume $headers array contains all required headers
+    foreach ($headers as $key => $value) {
+        if (strtolower($key) !== 'cookie') {
+            $requestHeaders[] = "$key: $value";
+        }
+    }
+
+    $ch = curl_init($scraperUrl);
+    curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER => $headers,
-        CURLOPT_HEADER => true,
+        CURLOPT_HTTPHEADER => $requestHeaders,
+        CURLOPT_HEADER => true,   // We need response headers from ScraperAPI (which include target's headers)
         CURLOPT_TIMEOUT => 10,
         CURLOPT_CONNECTTIMEOUT => 5,
-        CURLOPT_PROXY => $proxy,
-        CURLOPT_PROXYTYPE => CURLPROXY_HTTP,
-        CURLOPT_PROXYUSERPWD => $proxyAuth,
-        // Uncomment to get more verbose output (not needed in production)
-        // CURLOPT_VERBOSE => true,
-    ];
-    curl_setopt_array($ch, $options);
+    ]);
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
@@ -44,14 +57,11 @@ function makeRequest($url, $headers, $proxy, $proxyAuth) {
     return [$httpCode, $headerText, $error];
 }
 
-// Check for test mode
+// Test mode: check basic connectivity to ScraperAPI
 if (isset($_GET['test'])) {
-    // Simple test request to a site that returns headers
-    $proxy = "proxy.scraperapi.com:8001";
-    $auth = "scraperapi:" . "aac93ab62142f5ea8c722425382fd586";
-    $url = "http://httpbin.org/headers";
-    $headers = ["User-Agent: Test"];
-    list($code, $headerText, $error) = makeRequest($url, $headers, $proxy, $auth);
+    $apiKey = "aac93ab62142f5ea8c722425382fd586";
+    $targetUrl = "http://httpbin.org/headers";
+    list($code, $headerText, $error) = makeRequestViaScraperApi($targetUrl, ['Cookie' => ''], $apiKey);
     header('Content-Type: application/json');
     echo json_encode([
         'http_code' => $code,
@@ -71,21 +81,55 @@ if (empty($ck)) {
 
 $cookie = hex2str($ck);
 
-// Base headers
 $headers = [
-    "Cookie: $cookie",
-    "User-Agent: plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7"
+    "Cookie" => $cookie,
+    "User-Agent" => "plaYtv/7.1.3 (Linux;Android 14) ExoPlayerLib/2.11.7"
 ];
 
-// Optional credentials (if needed)
+// Optional credentials (if provided)
 $JIOCRED = getenv('JIOCRED');
 $CREDKEY = getenv('CREDKEY');
 $jiocred_hex = $_REQUEST['jiocred'] ?? $JIOCRED;
 $credkey_hex = $_REQUEST['credkey'] ?? $CREDKEY;
 
 if (!empty($jiocred_hex) && !empty($credkey_hex)) {
-    // ... (same decryption and header addition as before, omitted for brevity)
-    // Include the decryption code if you use it.
+    function decrypt_data($e_data, $key) {
+        $key = (int) $key;
+        $encrypted = base64_decode($e_data);
+        $decrypted = array_map(fn($char) => chr(ord($char) - $key), str_split($encrypted));
+        return implode('', $decrypted);
+    }
+    $jiocred = hex2str($jiocred_hex);
+    $credkey = hex2str($credkey_hex);
+    $cred = json_decode(decrypt_data($jiocred, $credkey), true);
+    if ($cred) {
+        $access_token = $cred['authToken'] ?? '';
+        $crm = $cred['sessionAttributes']['user']['subscriberId'] ?? '';
+        $device_id = $cred['deviceId'] ?? '';
+        $unique_id = $cred['sessionAttributes']['user']['unique'] ?? '';
+        $sso_token = $cred['sessionAttributes']['user']['ssoToken'] ?? '';
+
+        $headers = array_merge($headers, [
+            "accesstoken" => $access_token,
+            "appkey" => "NzNiMDhlYcQyNjJm",
+            "crmid" => $crm,
+            "deviceId" => $device_id,
+            "devicetype" => "phone",
+            "isott" => "true",
+            "languageId" => "6",
+            "lbcookie" => "1",
+            "os" => "android",
+            "osVersion" => "14",
+            "srno" => "250918144000",
+            "ssotoken" => $sso_token,
+            "subscriberId" => $crm,
+            "uniqueId" => $unique_id,
+            "usergroup" => "tvYR7NSNn7rymo3F",
+            "versionCode" => "452",
+            "Origin" => "https://www.jiocinema.com",
+            "Referer" => "https://www.jiocinema.com/",
+        ]);
+    }
 }
 
 // Build CDN URL
@@ -97,17 +141,14 @@ if (!empty($id)) {
     $url = "https://jiotvmblive.cdn.jio.com/";
 }
 
-// ScraperAPI settings
-$SCRAPER_API_KEY = "aac93ab62142f5ea8c722425382fd586";  // hardcoded for testing
-$proxyHost = "proxy.scraperapi.com:8001";
-$proxyAuth = "scraperapi:" . $SCRAPER_API_KEY;
+$SCRAPER_API_KEY = "aac93ab62142f5ea8c722425382fd586";
 
 $cookiesFound = [];
 $debug = [];
 
-// Make two requests
+// Make two requests via ScraperAPI
 for ($i = 0; $i < 2; $i++) {
-    list($httpCode, $headerText, $error) = makeRequest($url, $headers, $proxyHost, $proxyAuth);
+    list($httpCode, $headerText, $error) = makeRequestViaScraperApi($url, $headers, $SCRAPER_API_KEY);
     $debug[] = [
         'request_number' => $i + 1,
         'http_code' => $httpCode,
@@ -115,7 +156,6 @@ for ($i = 0; $i < 2; $i++) {
         'headers' => $headerText,
     ];
     if ($httpCode == 450 || $httpCode == 0) {
-        // Stop if blocked or connection failed
         break;
     }
     $cookies = extractCookiesFromHeader($headerText);
